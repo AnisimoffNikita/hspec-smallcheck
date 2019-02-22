@@ -1,23 +1,24 @@
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE FlexibleInstances #-}
+
+{-# LANGUAGE FlexibleContexts      #-}
+{-# LANGUAGE FlexibleInstances     #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeFamilies          #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 module Test.Hspec.SmallCheck (property) where
 
-import           Prelude ()
+import           Prelude                      ()
 import           Test.Hspec.SmallCheck.Compat
 
+import           Control.Exception            (try)
+import           Data.CallStack
 import           Data.IORef
+import           Data.Maybe
 import           Test.Hspec.Core.Spec
+import qualified Test.HUnit.Lang              as HUnit
 import           Test.SmallCheck
 import           Test.SmallCheck.Drivers
-import qualified Test.HUnit.Lang as HUnit
-import           Control.Exception (try)
-import           Data.Maybe
-import           Data.CallStack
 
-import qualified Test.Hspec.SmallCheck.Types as T
+import qualified Test.Hspec.SmallCheck.Types  as T
 
 property :: Testable IO a => a -> Property IO
 property = test
@@ -27,6 +28,7 @@ srcLocToLocation loc = Location {
   locationFile = srcLocFile loc
 , locationLine = srcLocStartLine loc
 , locationColumn = srcLocStartCol loc
+, locationAccuracy = ExactLocation
 }
 
 instance Testable IO (IO ()) where
@@ -51,7 +53,27 @@ instance Example (Property IO) where
           n <- readIORef counter
           reportProgress (n, 0)
     r <- smallCheckWithHook (paramsSmallCheckDepth c) hook p
-    return . Result "" $ case r of
+    return $ case r of
+      Just e -> case T.parseResult (ppFailure e) of
+        (m, Just (T.Failure loc reason)) -> Failure loc $ case reason of
+          T.Reason err -> Reason (fromMaybe "" $ T.concatPrefix m err)
+          T.ExpectedActual prefix expected actual -> ExpectedButGot (T.concatPrefix m prefix) expected actual
+        (m, Nothing) -> Failure Nothing (Reason m)
+      Nothing -> Success
+
+instance Example (a -> Property IO) where
+  type Arg (a -> Property IO) = a
+  evaluateExample p c action reportProgress = do
+    counter <- newIORef 0
+    let hook _ = do
+          modifyIORef counter succ
+          n <- readIORef counter
+          reportProgress (n, 0)
+    ref <- newIORef Nothing
+    action $ \a ->
+      smallCheckWithHook (paramsSmallCheckDepth c) hook (p a) >>= writeIORef ref
+    r <- readIORef ref
+    return $ case r of
       Just e -> case T.parseResult (ppFailure e) of
         (m, Just (T.Failure loc reason)) -> Failure loc $ case reason of
           T.Reason err -> Reason (fromMaybe "" $ T.concatPrefix m err)
